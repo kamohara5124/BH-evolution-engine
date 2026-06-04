@@ -1,3 +1,7 @@
+## Keywords
+AI, Multi-Agent System, Concept Engine, Evolutionary Architecture, Structure Evolution,
+LLM, Generative AI, Research Prototype, Self-Evolving System
+
 BH: Self-Evolving Multi-Agent Concept Engine
 自己進化型マルチエージェント概念エンジン「BH」
 
