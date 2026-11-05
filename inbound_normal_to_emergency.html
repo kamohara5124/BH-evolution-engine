@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Inbound Sightseeing & Bosai Map - Demo anywhere</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; }
+        #map { height: 100%; width: 100%; }
+        
+        /* 画面左上の管理パネル */
+        #top-left-panel {
+            position: fixed; top: 15px; left: 15px; z-index: 10000;
+            background: rgba(255, 255, 255, 0.95); padding: 12px;
+            border-radius: 8px; font-family: sans-serif;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            border: 2px solid #ccc;
+            width: 210px;
+        }
+        .mode-badge {
+            font-weight: bold; font-size: 13px; margin-bottom: 8px; display: block; text-align: center;
+        }
+        .action-btn {
+            background: #d9534f; color: white; border: none; padding: 8px 10px;
+            border-radius: 4px; cursor: pointer; font-weight: bold; width: 100%; font-size: 11px;
+            margin-top: 5px;
+        }
+        .action-btn.reset { background: #28a745; }
+        .action-btn.center-btn { background: #6c757d; }
+        .action-btn.center-btn.active { background: #007bff; }
+
+        /* 緊急時バナー（初期は非表示） */
+        #emergency-banner {
+            position: fixed; top: 0; left: 0; width: 100%;
+            background-color: #d9534f; color: white; padding: 12px;
+            text-align: center; font-family: sans-serif; z-index: 99999;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5); display: none;
+            animation: flash 1s infinite alternate;
+            box-sizing: border-box;
+        }
+        @keyframes flash {
+            from { background-color: #d9534f; }
+            to { background-color: #ff0000; }
+        }
+    </style>
+</head>
+<body>
+    <!-- 緊急時バナー -->
+    <div id="emergency-banner">
+        <b style="font-size: 16px;">🚨 EMERGENCY ALERT / 緊要警報発令</b><br>
+        <span style="font-size: 13px;">Earthquake / Tsunami: <b>MOVE TO HIGHER GROUND IMMEDIATELY</b> (今すぐ高台へ避難してください)</span>
+    </div>
+
+    <!-- 左上の管理パネル -->
+    <div id="top-left-panel">
+        <span id="status-text" class="mode-badge" style="color: #28a745;">🟢 NORMAL (平常時)</span>
+        <button id="center-toggle-btn" class="action-btn center-btn" onclick="toggleCenterMode()">📍 現在地を中心に固定: OFF</button>
+        <button class="action-btn" onclick="startEmergency()">⚡ 災害発生をシミュレート</button>
+        <button class="action-btn reset" onclick="resetNormal()">🛡️ 平常時に戻す</button>
+    </div>
+
+    <!-- 地図エリア -->
+    <div id="map"></div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // 初期位置は仮で筑前町にしておき、GPSが取れ次第、現在地へ移動します
+        var map = L.map('map').setView([33.483, 130.665], 14);
+
+        L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+            attribution: 'GSI Japan'
+        }).addTo(map);
+
+        // アイコン作成ヘルパー
+        function createEmojiIcon(emoji, bgColor) {
+            return L.divIcon({
+                html: '<div style="background-color: ' + bgColor + '; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 18px; box-shadow: 0 3px 6px rgba(0,0,0,0.3); border: 2px solid white;">' + emoji + '</div>',
+                className: '',
+                iconSize: [34, 34],
+                iconAnchor: [17, 17]
+            });
+        }
+
+        var sightseeingIcon = createEmojiIcon('🌸', '#28a745');
+        var shelterIcon     = createEmojiIcon('🛡️', '#d9534f');
+        var hospitalIcon    = createEmojiIcon('🏥', '#d9534f');
+        var waterIcon       = createEmojiIcon('💧', '#007bff');
+        var supplyIcon      = createEmojiIcon('🛒', '#28a745');
+        var toiletIcon      = createEmojiIcon('🚻', '#007bff');
+
+        let userMarker = null;
+        let lastLatLng = null;
+        let isCenterMode = false;
+        let spotsLayerGroup = L.layerGroup().addTo(map); // スポットをまとめるグループ
+        let isSpotsGenerated = false;
+
+        // GPSの常時トラッキング
+        map.locate({setView: true, maxZoom: 15, watch: true, enableHighAccuracy: true});
+        
+        map.on('locationfound', function(e) {
+            lastLatLng = e.latlng;
+            
+            if (!userMarker) {
+                userMarker = L.circleMarker(e.latlng, {
+                    radius: 10,
+                    color: '#ffffff',
+                    weight: 3,
+                    fillColor: '#007bff',
+                    fillOpacity: 1
+                }).addTo(map).bindPopup('📍 Your Location (現在地)');
+
+                // 【超便利機能】最初に現在地が取れた瞬間に、その周囲にスポットを自動生成する！
+                generateAroundSpots(e.latlng.lat, e.latlng.lng);
+            } else {
+                userMarker.setLatLng(e.latlng);
+            }
+
+            if (isCenterMode) {
+                map.panTo(e.latlng);
+            }
+        });
+
+        // 📍 現在地（lat, lng）を基準にして、周囲に自動でピンを散りばめる関数
+        function generateAroundSpots(lat, lng) {
+            if (isSpotsGenerated) return;
+            isSpotsGenerated = true;
+
+            // 緯度経度のわずかなズレを使って、現在地のまわりに各スポットを配置
+            let spots = [
+                { lat: lat + 0.003, lng: lng + 0.004, icon: sightseeingIcon, html: '🌸 <b>Sightseeing Spot (観光スポット)</b>' },
+                { lat: lat - 0.002, lng: lng - 0.003, icon: shelterIcon,     html: '🛡️ <b>Emergency Shelter (避難所)</b>' },
+                { lat: lat + 0.002, lng: lng - 0.004, icon: hospitalIcon,    html: '🏥 <b>Hospital (病院)</b>' },
+                { lat: lat - 0.004, lng: lng + 0.002, icon: waterIcon,       html: '💧 <b>Water Supply (給水)</b>' },
+                { lat: lat + 0.004, lng: lng + 0.001, icon: supplyIcon,      html: '🛒 <b>Supplies / Store (補給)</b>' },
+                { lat: lat - 0.003, lng: lng - 0.001, icon: toiletIcon,      html: '🚻 <b>Public Restroom (トイレ)</b>' }
+            ];
+
+            spots.forEach(function(s) {
+                L.marker([s.lat, s.lng], {icon: s.icon})
+                 .addTo(spotsLayerGroup)
+                 .bindPopup(s.html);
+            });
+        }
+
+        // 「現在地を中心に固定」ボタン切り替え
+        function toggleCenterMode(forceState = null) {
+            if (forceState !== null) {
+                isCenterMode = forceState;
+            } else {
+                isCenterMode = !isCenterMode;
+            }
+
+            let btn = document.getElementById('center-toggle-btn');
+            if (isCenterMode) {
+                btn.classList.add('active');
+                btn.innerHTML = '📍 現在地を中心に固定: ON';
+                if (lastLatLng) {
+                    map.setView(lastLatLng, 16);
+                }
+            } else {
+                btn.classList.remove('active');
+                btn.innerHTML = '📍 現在地を中心に固定: OFF';
+            }
+        }
+
+        // 音声＆エマージェンシーロジック
+        let audioCtx = null;
+        let alarmInterval = null;
+
+        function startEmergency() {
+            document.getElementById('emergency-banner').style.display = 'block';
+            let status = document.getElementById('status-text');
+            status.style.color = '#d9534f';
+            status.innerHTML = '🚨 EMERGENCY (災害発生中)';
+            
+            toggleCenterMode(true); // 自動で中心固定をONに
+
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (!alarmInterval) {
+                alarmInterval = setInterval(() => {
+                    if (!audioCtx) return;
+                    let osc = audioCtx.createOscillator();
+                    let gain = audioCtx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = 880;
+                    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.15);
+                }, 400);
+            }
+        }
+
+        function resetNormal() {
+            document.getElementById('emergency-banner').style.display = 'none';
+            let status = document.getElementById('status-text');
+            status.style.color = '#28a745';
+            status.innerHTML = '🟢 NORMAL (平常時)';
+            
+            if (alarmInterval) {
+                clearInterval(alarmInterval);
+                alarmInterval = null;
+            }
+        }
+    </script>
+</body>
+</html>
